@@ -1,0 +1,11 @@
+---
+
+### 📦 `requirements.txt`
+
+```text
+openai-whisper
+moviepy
+ffmpeg-python
+srt
+numpy
+torch

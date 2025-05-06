@@ -1,0 +1,21 @@
+# Node
+node_modules/
+dist/
+.env
+*.zip
+
+# API keys / credentials
+.env
+figma.config.js
+credentials.json
+
+# VSCode
+.vscode/
+
+# MacOS
+.DS_Store
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

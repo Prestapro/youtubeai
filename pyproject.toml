@@ -1,0 +1,19 @@
+[project]
+name = "youtubeai-extract"
+version = "0.1.0"
+description = "Extract video clips by keyword using Whisper and ffmpeg."
+authors = [
+  { name="Your Name", email="your@email.com" }
+]
+dependencies = [
+  "openai-whisper",
+  "moviepy",
+  "ffmpeg-python",
+  "srt",
+  "numpy",
+  "torch"
+]
+requires-python = ">=3.8"
+
+[project.scripts]
+extract-clips = "extract_clips_by_keyword:main"
