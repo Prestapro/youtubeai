@@ -1,11 +1,10 @@
----
-
-### 📦 `requirements.txt`
-
-```text
 openai-whisper
 moviepy
 ffmpeg-python
 srt
 numpy
 torch
+nltk
+pymorphy2
+tqdm
+faster-whisper

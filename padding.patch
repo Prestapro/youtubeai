@@ -1,0 +1,37 @@
+--- extract_clips_by_keyword.py
++++ extract_clips_by_keyword.py
+@@ -20,6 +20,10 @@ import argparse
+     parser.add_argument("--partial", action="store_true",
+                         help="Разрешить частичное совпадение слов (пример = например), но не подстроки (мир ≠ мироед)")
++    parser.add_argument(
++        "--padding-before", type=float, default=1.0,
++        help="Секунд для добавления перед найденным фрагментом (по умолчанию 1.0)"
++    )
++    parser.add_argument(
++        "--padding-after", type=float, default=1.0,
++        help="Секунд для добавления после найденного фрагмента (по умолчанию 1.0)"
++    )
+@@ -123,7 +127,12 @@ def main():
+-    extract_by_keyword(keyword, audio_file=audio_file, allow_partial=args.partial)
++    extract_by_keyword(
++        keyword,
++        audio_file=audio_file,
++        allow_partial=args.partial,
++        padding_before=args.padding_before,
++        padding_after=args.padding_after
++    )
+ 
+ def extract_by_keyword(keyword, video_json="video.json", audio_file="audio.mp3", allow_partial=False):
++    # now supports custom padding before/after each segment
+     with open(video_json, "r", encoding="utf-8") as f:
+         data = json.load(f)
+@@ -195,7 +204,7 @@ def extract_by_keyword(keyword, video_json="video.json", audio_file="audio.mp3", 
+         for i in range(len(norm_words) - phrase_length + 1):
+             window = norm_words[i:i+phrase_length]
+             # original padding was hardcoded 0.5 seconds
+-            start = max(0, window[0][1] - 0.5)
+-            end = window[-1][2] + 0.5
++            start = max(0, window[0][1] - padding_before)
++            end = window[-1][2] + padding_after
+             print(f"🔎 Найдена фраза на {start:.2f}s – {end:.2f}s")
+             target_segments.append((start, end))

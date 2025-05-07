@@ -1,12 +1,25 @@
 import os
+import argparse
+#
+# Attempt to load speaker diarization pipeline
 try:
     from pyannote.audio import Pipeline
-    HF_TOKEN = os.getenv("HUGGINGFACE_TOKEN")  # ваш токен HuggingFace для pyannote
-    diarizer = Pipeline.from_pretrained(
-        "pyannote/speaker-diarization", use_auth_token=HF_TOKEN
-    )
+    HF_TOKEN = os.getenv("HUGGINGFACE_TOKEN")
+    if not HF_TOKEN:
+        print("⚠️ HUGGINGFACE_TOKEN not set; skipping speaker diarization.")
+        diarizer = None
+    else:
+        try:
+            diarizer = Pipeline.from_pretrained(
+                "pyannote/speaker-diarization",
+                use_auth_token=HF_TOKEN
+            )
+        except Exception as e:
+            print(f"⚠️ Could not load 'pyannote/speaker-diarization' pipeline: {e}")
+            print("   Ensure your Hugging Face token has access and retry.")
+            diarizer = None
 except ImportError:
-    # pyannote.audio not installed, skipping speaker diarization
+    print("⚠️ pyannote.audio not installed; skipping speaker diarization.")
     diarizer = None
 import nltk
 from nltk.tokenize import word_tokenize
@@ -199,6 +212,22 @@ def download_audio_from_youtube(url):
         url
     ])
 
+# --- Download audio only for fast transcription ---
+def download_audio_only(youtube_url, output_path):
+    """
+    Скачать только аудио-дорожку из YouTube для ускоренной транскрипции в WAV.
+    """
+    cmd = [
+        "yt-dlp",
+        "--cookies-from-browser", "chrome",
+        "-x",
+        "--audio-format", "wav",
+        "-f", "bestaudio",
+        "-o", output_path,
+        youtube_url
+    ]
+    subprocess.run(cmd, check=True)
+
 def tokenize_words_only(data):
     result = []
     for item in data:
@@ -218,7 +247,7 @@ def download_audio(youtube_url, output_path):
     cmd = [
         "yt-dlp",
         "--cookies-from-browser", "chrome",
-        "-f", "bestvideo+bestaudio",
+        "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]",
         "--merge-output-format", "mp4",
         "-o", output_path,
         youtube_url
@@ -227,7 +256,14 @@ def download_audio(youtube_url, output_path):
 
 def transcribe_audio(audio_path):
     print("📥 Загружаем модель Faster-Whisper...")
-    model = WhisperModel("medium", device="cpu", compute_type="int8")
+    # Подбор устройства: MPS на macOS (Apple Silicon), иначе CPU
+    try:
+        import torch
+        device = "mps" if torch.backends.mps.is_available() else "cpu"
+    except ImportError:
+        device = "cpu"
+    print(f"Используем устройство для транскрипции: {device}")
+    model = WhisperModel("medium", device=device, compute_type="int8")
     print("🧠 Транскрибируем аудио (c word_timestamps)...")
     segments, info = model.transcribe(audio_path, beam_size=1, word_timestamps=True)
     segments = list(segments)
@@ -363,7 +399,16 @@ def log_time(stage, start_time):
 
 #
 # --- Add extract_by_keyword function ---
-def extract_by_keyword(keyword, video_json="video.json", audio_file="audio.mp3"):
+def extract_by_keyword(
+    keyword,
+    video_json="video.json",
+    audio_file="audio.mp3",
+    video_file="audio.mp3",
+    allow_partial=False,
+    padding_before=1.0,
+    padding_after=1.0
+):
+    # now supports custom padding before/after each segment
     with open(video_json, "r", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -408,18 +453,58 @@ def extract_by_keyword(keyword, video_json="video.json", audio_file="audio.mp3")
         for i in range(len(norm_words) - phrase_length + 1):
             window = norm_words[i:i+phrase_length]
             print(f"[DEBUG] Checking window: {[w[0] for w in window]} vs {phrase_tokens}")
-            if all(p == w[0] for p, w in zip(phrase_tokens, window)):
-                start = max(0, window[0][1] - 0.5)
-                end = window[-1][2] + 0.5
+            if all(
+                (p == w[0]) or (
+                    allow_partial
+                    and len(p) >= 3
+                    and (w[0].startswith(p) or w[0].endswith(p))
+                )
+                for p, w in zip(phrase_tokens, window)
+            ):
+                start = max(0, window[0][1] - padding_before)
+                end = window[-1][2] + padding_after
                 print(f"🔎 Найдена фраза на {start:.2f}s – {end:.2f}s")
                 target_segments.append((start, end))
+
+    # Merge overlapping or adjacent segments to avoid duplicates
+    target_segments.sort(key=lambda x: x[0])
+    merged_segments = []
+    for start, end in target_segments:
+        if not merged_segments:
+            merged_segments.append((start, end))
+        else:
+            prev_start, prev_end = merged_segments[-1]
+            if start <= prev_end:
+                # Overlaps or adjacent: extend the previous segment
+                merged_segments[-1] = (prev_start, max(prev_end, end))
+            else:
+                merged_segments.append((start, end))
+    target_segments = merged_segments
+
+    # Merge overlapping or adjacent segments to avoid duplicates
+    target_segments.sort(key=lambda x: x[0])
+    merged_segments = []
+    for start, end in target_segments:
+        if not merged_segments:
+            merged_segments.append((start, end))
+        else:
+            prev_start, prev_end = merged_segments[-1]
+            if start <= prev_end:
+                # Overlaps or adjacent: extend the previous segment
+                merged_segments[-1] = (prev_start, max(prev_end, end))
+            else:
+                merged_segments.append((start, end))
+    target_segments = merged_segments
 
     if not target_segments:
         print(f"Фраза '{keyword}' не найдена.")
         return
 
-    print(f"Найдено {len(target_segments)} вхождений фразы '{keyword}'")
-    extract_clips(audio_file, target_segments)
+    print(
+        f"Найдено {len(target_segments)} вхождений фразы '{keyword}'"
+        + (" (частичное совпадение)" if allow_partial else "")
+    )
+    extract_clips(audio_file, target_segments, video_file=video_file)
 
 # --- Основная функция: скачивание, обработка, транскрипция ---
 def generate_timestamp_file(input_file="video.json", output_file="timestamps.json"):
@@ -497,7 +582,6 @@ def tokenize_words_only(data):
         result.extend(words)
     return result
 
-
 def extract_clips(audio_file, segments, video_file="audio.mp4"):
     start_time_total = time.time()
     start_time_cut = time.time()
@@ -516,7 +600,11 @@ def extract_clips(audio_file, segments, video_file="audio.mp4"):
         output_filename = f"clip_{idx}_{safe_start}_{safe_end}.mp4"
         print(f"[DEBUG] Клип {idx}: {start:.2f}s – {end:.2f}s ({end - start:.2f}s)")
         try:
-            timestamp = f"{int(start // 60):02}\\:{int(start % 60):02}"
+            # Human-readable timestamp HH:MM:SS
+            hours = int(start // 3600)
+            mins = int((start % 3600) // 60)
+            secs = int(start % 60)
+            timestamp = f"{hours:02}\\:{mins:02}\\:{secs:02}"
             counter = f"{idx}/{total_segments}"
             (
                 ffmpeg
@@ -599,24 +687,55 @@ def log_time(stage, start_time):
     print(f"⏱ {stage} заняло {elapsed_time:.2f} секунд")
 
 def main():
-    youtube_url = input("Введите URL YouTube видео: ").strip()
-    if not youtube_url:
-        youtube_url = "https://www.youtube.com/watch?v=23UGN3qqBWY"
+    parser = argparse.ArgumentParser(description="Extract clips from YouTube video by keywords.")
+    parser.add_argument("--video", type=str, required=True, help="YouTube video URL")
+    parser.add_argument("--keywords", type=str, required=True, help="Ключевые слова через запятую")
+    parser.add_argument("--partial", action="store_true",
+                        help="Разрешить частичное совпадение слов (пример = например), но не подстроки (мир ≠ мироед)")
+    parser.add_argument(
+        "--padding-before", type=float, default=1.0,
+        help="Секунд для добавления перед найденным фрагментом (по умолчанию 1.0)"
+    )
+    parser.add_argument(
+        "--padding-after", type=float, default=1.0,
+        help="Секунд для добавления после найденного фрагмента (по умолчанию 1.0)"
+    )
+    parser.add_argument(
+        "--keep-clips", action="store_true",
+        help="Не удалять отдельные клипы после объединения в final.mp4 (по умолчанию клипы удаляются)"
+    )
+    parser.add_argument(
+        "--download-video", action="store_true",
+        help="Сохранять оригинальный видеофайл после обработки (по умолчанию удаляется)"
+    )
+    args = parser.parse_args()
+    # Удаляем старый JSON, чтобы не использовать устаревшие данные
+    if os.path.exists("video.json"):
+        os.remove("video.json")
 
-    # Запрашиваем ключевые слова для поиска сразу после ссылки
-    keywords_input = input("Введите ключевые слова через запятую: ").strip()
-    keywords = [w.strip() for w in keywords_input.split(",") if w.strip()]
+    youtube_spec = os.path.expanduser(args.video)
+    keywords = [w.strip() for w in args.keywords.split(",") if w.strip()]
     if not keywords:
         print("Ключевые слова не введены. Завершение.")
         return
 
-    # Скачиваем видео+аудио с указанием формата mp4
-    audio_prefix = "audio"
-    print("🔻 Скачивание аудио...")
-    download_audio(youtube_url, audio_prefix)
-
-    # После загрузки будет файл audio.mp4
-    audio_file = f"{audio_prefix}.mp4"
+    youtube_spec = os.path.expanduser(args.video)
+    if os.path.exists(youtube_spec):
+        audio_file = video_file = youtube_spec
+        downloaded = False
+    else:
+        # Скачиваем аудио для транскрипции
+        audio_file = "audio.wav"
+        print("🔻 Скачиваем аудио для транскрипции...")
+        download_audio_only(args.video, audio_file)
+        # Скачиваем видео+аудио, если нужен оригинал
+        if args.download_video:
+            video_file = "video.mp4"
+            print("🔻 Скачиваем оригинал видео+аудио в video.mp4...")
+            download_audio(args.video, video_file)
+        else:
+            video_file = audio_file
+        downloaded = True
 
     print("🧠 Распознавание речи...")
     transcription = transcribe_audio(audio_file)
@@ -642,10 +761,28 @@ def main():
 
     for keyword in keywords:
         print(f"🎯 Поиск ключевой фразы и нарезка клипов для '{keyword}'...")
-        extract_by_keyword(keyword, audio_file=audio_file)
+        extract_by_keyword(
+            keyword,
+            audio_file=audio_file,
+            video_file=video_file,
+            allow_partial=args.partial,
+            padding_before=args.padding_before,
+            padding_after=args.padding_after
+        )
+        if not args.keep_clips:
+            import glob
+            for clip_file in glob.glob("clip_*.mp4"):
+                if os.path.basename(clip_file) != "final.mp4":
+                    os.remove(clip_file)
+            print("🗑️ Удалены отдельные клипы, оставлен только final.mp4")
 
-    print("🧹 Удаление временного аудиофайла...")
-    os.remove(audio_file)
+    # Clean up downloaded file if needed
+    if downloaded:
+        if not args.download_video:
+            print("🧹 Удаление временного видеофайла...")
+            os.remove(video_file)
+        else:
+            print(f"💾 Оригинальный видеофайл сохранён как {video_file}")
 
 if __name__ == "__main__":
     main()

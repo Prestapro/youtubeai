@@ -6,7 +6,6 @@ dist/
 
 # API keys / credentials
 .env
-figma.config.js
 credentials.json
 
 # VSCode
@@ -19,3 +18,14 @@ credentials.json
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Generated clips
+clip_*.mp4
+
+# Generated transcripts
+transcript*.txt
+
+# Final output files
+audio.wav
+final.mp4
+video.json
