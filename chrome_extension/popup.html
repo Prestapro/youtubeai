@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font-family: sans-serif; width: 300px; padding: 10px; }
+    input, button { width: 100%; margin: 5px 0; }
+    #clips { font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <h3>YouTubeAI Clips</h3>
+  <input id="keywords" type="text" placeholder="Ключевые слова" />
+  <label><input type="checkbox" id="partial"/> Частичное совпадение</label>
+  <input id="padding_before" type="number" placeholder="Padding before (s)" value="1.0" />
+  <input id="padding_after" type="number" placeholder="Padding after (s)" value="1.0" />
+  <button id="run">Run</button>
+  <div id="status"></div>
+  <div id="clips"></div>
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -3,7 +3,7 @@ node_modules/
 dist/
 .env
 *.zip
-
+*.mp4
 # API keys / credentials
 .env
 credentials.json

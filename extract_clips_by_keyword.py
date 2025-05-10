@@ -1,5 +1,9 @@
 import os
 import argparse
+
+# --- Flask API imports ---
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 #
 # Attempt to load speaker diarization pipeline
 try:
@@ -33,6 +37,55 @@ from collections import namedtuple
 import ffmpeg
 
 from tqdm import tqdm
+
+# --- Initialize Flask app ---
+app = Flask(__name__)
+CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
+
+# --- Add CORS headers for all responses (handle preflight OPTIONS requests) ---
+@app.after_request
+def add_cors_headers(response):
+    response.headers.add("Access-Control-Allow-Origin", "*")
+    response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization")
+    response.headers.add("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+    return response
+
+# --- Flask-based local server interface ---
+@app.route("/api/extract", methods=["POST"])
+def api_extract():
+    """
+    Expects JSON:
+    {
+        "video": "<YouTube URL or filepath>",
+        "keywords": "kw1,kw2",
+        "partial": true/false,
+        "padding_before": float,
+        "padding_after": float,
+        "keep_clips": true/false,
+        "download_video": true/false
+    }
+    Returns JSON with clip filenames and transcript.
+    """
+    params = request.json or {}
+    # Build args for CLI-style main
+    cli_args = ["--video", params.get("video", ""),
+                "--keywords", params.get("keywords", "")]
+    if params.get("partial"):
+        cli_args.append("--partial")
+    if "padding_before" in params:
+        cli_args += ["--padding-before", str(params["padding_before"])]
+    if "padding_after" in params:
+        cli_args += ["--padding-after", str(params["padding_after"])]
+    if params.get("keep_clips"):
+        cli_args.append("--keep-clips")
+    if params.get("download_video"):
+        cli_args.append("--download-video")
+    # Run extraction logic without terminating the process
+    try:
+        result = run_extraction(cli_args)
+        return jsonify({"status": "ok", **result})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # --- Проверка наличия video.json и создание, если его нет ---
 if not os.path.exists('video.json'):
@@ -240,8 +293,6 @@ def tokenize_words_only(data):
 
 # Функция для обработки видео и создания транскрипта с помощью whisper.cpp, сохранение результата в video.json
 
-from faster_whisper import WhisperModel
-
 def download_audio(youtube_url, output_path):
     # Скачиваем полный видеофайл (видео+аудио) для нарезки
     cmd = [
@@ -255,56 +306,37 @@ def download_audio(youtube_url, output_path):
     subprocess.run(cmd, check=True)
 
 def transcribe_audio(audio_path):
-    print("📥 Загружаем модель Faster-Whisper...")
-    # Подбор устройства: MPS на macOS (Apple Silicon), иначе CPU
-    try:
-        import torch
-        device = "mps" if torch.backends.mps.is_available() else "cpu"
-    except ImportError:
-        device = "cpu"
-    print(f"Используем устройство для транскрипции: {device}")
-    model = WhisperModel("medium", device=device, compute_type="int8")
-    print("🧠 Транскрибируем аудио (c word_timestamps)...")
-    segments, info = model.transcribe(audio_path, beam_size=1, word_timestamps=True)
-    segments = list(segments)
-    print(f"✅ Язык: {info.language}, продолжительность: {info.duration:.2f} сек")
-
-    # Выполняем диаризацию
-    if diarizer:
-        print("🎙️ Выполняем диаризацию спикеров...")
-        diarization = diarizer(audio_path)
-    else:
-        diarization = []
-
-    result = {"text": "", "segments": [], "language": info.language}
-    for i, segment in enumerate(segments):
-        # Определяем спикера по началу сегмента
-        speaker_label = None
-        if diarizer:
-            for turn, _, speaker in diarization.itertracks(yield_label=True):
-                if segment.start >= turn.start and segment.start < turn.end:
-                    speaker_label = speaker
-                    break
-        else:
-            # Fallback: alternate speakers if no diarization available
-            speaker_label = f"speaker_{i % 2}"
-
-        seg_data = {
-            "id": i,
-            "speaker": speaker_label or "Unknown",
-            "start": segment.start,
-            "end": segment.end,
-            "text": segment.text,
-            "words": [
-                {"word": w.word, "start": w.start, "end": w.end}
-                for w in (segment.words or [])
-            ]
-        }
-        result["segments"].append(seg_data)
-        # Append each speaker segment on its own line
-        result["text"] += f"{speaker_label or 'Unknown'}: {segment.text}\n"
-
-    return result
+    """
+    Transcribe audio using whisper.cpp (ggml).
+    """
+    import subprocess
+    import tempfile
+    # Prepare temp file for output
+    txt_out = tempfile.NamedTemporaryFile(suffix=".txt", delete=False).name
+    # Call whisper.cpp binary
+    cmd = [
+        WHISPER_CPP_BIN,
+        "-m", WHISPER_CPP_MODEL,
+        audio_path,
+        "--output", txt_out,
+        "--language", "ru"  # or auto-detect
+    ]
+    subprocess.run(cmd, check=True)
+    # Read transcription
+    with open(txt_out, "r", encoding="utf-8") as f:
+        text = f.read()
+    # Parse into segments (simple split by lines)
+    segments = []
+    for idx, line in enumerate(text.splitlines()):
+        segments.append({
+            "id": idx,
+            "speaker": "Unknown",
+            "start": 0.0,
+            "end": 0.0,
+            "text": line,
+            "words": []
+        })
+    return {"text": text, "segments": segments, "language": "ru"}
 
 def print_word_timestamps(transcription):
     for segment in tqdm(transcription['segments'], desc="⏱ Сегменты"):
@@ -686,7 +718,15 @@ def log_time(stage, start_time):
     elapsed_time = time.time() - start_time
     print(f"⏱ {stage} заняло {elapsed_time:.2f} секунд")
 
-def main():
+def run_extraction(args_list):
+    """
+    Accepts a list of CLI-style arguments (as strings), parses them,
+    runs the extraction logic, and returns a dict:
+    {
+        "clips": [list of generated clip filenames],
+        "transcript": "<full transcript text>"
+    }
+    """
     parser = argparse.ArgumentParser(description="Extract clips from YouTube video by keywords.")
     parser.add_argument("--video", type=str, required=True, help="YouTube video URL")
     parser.add_argument("--keywords", type=str, required=True, help="Ключевые слова через запятую")
@@ -708,7 +748,7 @@ def main():
         "--download-video", action="store_true",
         help="Сохранять оригинальный видеофайл после обработки (по умолчанию удаляется)"
     )
-    args = parser.parse_args()
+    args = parser.parse_args(args_list)
     # Удаляем старый JSON, чтобы не использовать устаревшие данные
     if os.path.exists("video.json"):
         os.remove("video.json")
@@ -716,8 +756,7 @@ def main():
     youtube_spec = os.path.expanduser(args.video)
     keywords = [w.strip() for w in args.keywords.split(",") if w.strip()]
     if not keywords:
-        print("Ключевые слова не введены. Завершение.")
-        return
+        raise ValueError("Ключевые слова не введены.")
 
     youtube_spec = os.path.expanduser(args.video)
     if os.path.exists(youtube_spec):
@@ -726,41 +765,34 @@ def main():
     else:
         # Скачиваем аудио для транскрипции
         audio_file = "audio.wav"
-        print("🔻 Скачиваем аудио для транскрипции...")
+        # Удаляем старые файлы перед перезаписью
+        if os.path.exists(audio_file):
+            os.remove(audio_file)
         download_audio_only(args.video, audio_file)
         # Скачиваем видео+аудио, если нужен оригинал
         if args.download_video:
             video_file = "video.mp4"
-            print("🔻 Скачиваем оригинал видео+аудио в video.mp4...")
+            # Удаляем старые файлы перед перезаписью
+            if os.path.exists(video_file):
+                os.remove(video_file)
             download_audio(args.video, video_file)
         else:
             video_file = audio_file
         downloaded = True
 
-    print("🧠 Распознавание речи...")
     transcription = transcribe_audio(audio_file)
 
-    print("🕒 Результаты с таймкодами:")
-    print_word_timestamps(transcription)
-
-    print("💾 Сохраняем результат в video.json...")
+    # Сохраняем результат в video.json
     with open("video.json", "w", encoding="utf-8") as f:
         json.dump(transcription, f, ensure_ascii=False, indent=4)
 
-    # Сохраняем полный текст транскрипции с инкрементированием имени
-    base_name = "transcript"
-    ext = ".txt"
-    file_name = base_name + ext
-    counter = 1
-    while os.path.exists(file_name):
-        file_name = f"{base_name}_{counter}{ext}"
-        counter += 1
-    print(f"💾 Сохраняем полный текст транскрипции в {file_name}...")
+    # Сохраняем полный текст транскрипции (перезапись существующего файла)
+    file_name = "transcript.txt"
     with open(file_name, "w", encoding="utf-8") as f:
         f.write(transcription.get("text", "").strip())
 
+    # Нарезаем клипы по каждому ключевому слову
     for keyword in keywords:
-        print(f"🎯 Поиск ключевой фразы и нарезка клипов для '{keyword}'...")
         extract_by_keyword(
             keyword,
             audio_file=audio_file,
@@ -774,15 +806,40 @@ def main():
             for clip_file in glob.glob("clip_*.mp4"):
                 if os.path.basename(clip_file) != "final.mp4":
                     os.remove(clip_file)
-            print("🗑️ Удалены отдельные клипы, оставлен только final.mp4")
 
     # Clean up downloaded file if needed
     if downloaded:
         if not args.download_video:
-            print("🧹 Удаление временного видеофайла...")
-            os.remove(video_file)
-        else:
-            print(f"💾 Оригинальный видеофайл сохранён как {video_file}")
+            if os.path.exists(video_file):
+                os.remove(video_file)
+
+    # Собираем список клипов
+    import glob
+    clip_files = sorted([os.path.basename(f) for f in glob.glob("clip_*.mp4")])
+    # Добавляем финальный склеенный файл, если есть
+    if os.path.exists("final.mp4"):
+        clip_files.append("final.mp4")
+    # Прочитать полный текст транскрипта
+    transcript_text = ""
+    if os.path.exists("transcript.txt"):
+        with open("transcript.txt", "r", encoding="utf-8") as f:
+            transcript_text = f.read()
+    return {
+        "clips": clip_files,
+        "transcript": transcript_text
+    }
 
 if __name__ == "__main__":
-    main()
+    import sys
+    # If --serve is specified, start Flask server
+    if "--serve" in sys.argv:
+        # Determine port from environment or default to 5000
+        flask_port = int(os.getenv("FLASK_PORT", "5001"))
+        print(f"⚙️ Starting Flask server on http://0.0.0.0:{flask_port}")
+        sys.argv.remove("--serve")
+        app.run(host="0.0.0.0", port=flask_port, debug=True)
+    else:
+        # Run CLI extraction
+        args = [arg for arg in sys.argv[1:] if arg != "--serve"]
+        run_extraction(args)
+
